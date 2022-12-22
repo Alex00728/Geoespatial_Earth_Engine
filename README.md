@@ -1,2 +1,2 @@
-# Geoespatial_Earth_Engine
+# Geospatial_Earth_Engine
 Análisis Geoespacial con Earth Engine (RGEE)
