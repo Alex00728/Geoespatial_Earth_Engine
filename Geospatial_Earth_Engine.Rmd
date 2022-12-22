@@ -1,0 +1,343 @@
+---
+title: "Taller 1 Geoespacial"
+author: "Alex Alvarez"
+date: "2022-10-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de libraries e inicialización de Earth Engine
+
+
+```{r}
+set.seed(42) # Reproducibilidad
+pacman::p_load(tidyverse, rgee, sf, raster, mapedit, lubridate, latticeExtra)
+ee_Initialize(drive = T)
+```
+
+## Introducción 
+
+En el marco de la sequía que ha experimentado la zona central de Chile en la última decada, se llevará a cabo un análisis geoespacial para evidenciar con datos la evolución de tal fenómeno.
+
+ 1. Problema a estudiar: Sequía en la Reserva Nacional Lago Peñuelas, en particular el mismo Lago Peñuelas.
+  Región de Interés: El cuerpo de agua Lago Peñuelas
+  Pregunta de investigación: ¿Se puede medir la evolución superficie de un cuerpo de agua como el Lago Peñuelas de forma efectiva con imágenes satelitales, tal que el método sea escalable y reproducible?
+  Hipótesis: si se logra medir la evolución de la superficie de algún cuerpo de agua con tales técnicas, el método debería poder escalarse de para obtener ese tipo de información sobre el territorio chileno y el mundo.
+
+
+ 2. Diseño de solución: Se analizará la evolución de las imágenes satelitales obtenidas con Earth Engine de la región de interés para constatar la sequía. Se utilizará NDWI (Normalized Difference Water Index) para obtener la superficie del cuerpo de agua a través del tiempo y a la vez que se tomarán otros datos que puedan relacionarse con la sequía y con la misma evolución de tal cuerpo de agua.
+
+Región de Interés: Reserva Nacional Lago Peñuelas
+* Se deja la opción de seleccionar manualmente otra región de interés con mapedit para comparar resultados y escalabilidad del método
+
+```{r}
+roi <-
+  c(-71.5298477, -33.1506884) %>%  #Lago Peñuelas
+  st_point(dim = "XYZ") %>%
+  st_buffer(dist = 0.03) %>%
+  sf_as_ee()
+
+## Visualización (OPCIONAL):
+
+Map$centerObject(roi)
+Map$addLayer(roi)
+
+## Definir una nueva Región de Interés manualmente con mapedit (OPCIONAL):
+
+# roi <- mapedit::editMap()%>%
+# sf_as_ee()
+# Map$centerObject(roi)
+# Map$addLayer(roi)
+
+
+```
+
+
+
+## Selección de Recursos en Earth Engine
+* Imágenes del satélite Landsat 8 para obtener el NDWI
+* Precipitaciones de Terraclimate
+
+```{r}
+LS8_disp <- ee$ImageCollection('LANDSAT/LC08/C01/T1_TOA')
+Terraclimate <- ee$ImageCollection("IDAHO_EPSCOR/TERRACLIMATE")
+
+```
+
+
+
+## Funciones para toma de datos
+* TC_sum: Toma de la suma de datos como precipitaciones mensuales en un intervalo de tiempo; utilizando el intervalo de fechas  {date - n , date + n}
+* NDWI_ULT: A partir de imágenes de Landsat 8 en un intervalo de tiempo
+ Utilizando el intervalo de fechas  {date - n , date + n}
+ genera un Mapa Interactivo NDWI (vis = T) o retorna el área del cuerpo de agua en m2 (vis = F):
+ visualiza el NDWI según la variable umbral
+
+
+```{r}
+# Toma de la media datos en Terraclimate en un intervalo de tiempo:
+# Utilizando el intervalo de fechas  {date - n , date + n}
+TC_sum <- function(date, n = 2, unit = "month") {
+  d0 <- ee$Date(date)
+  d1 <- d0$advance(-n, unit)
+  d2 <- d0$advance(n, unit)
+  
+  agg_TC <- Terraclimate$filterDate(d1, d2)$sum()
+  agg_TC$set(
+    list('system:index' =  ee$String$cat(d1$format("y-M"),d2$format("_y-M")))
+  )
+}
+
+# A partir de imágenes de Landsat 8 en un intervalo de tiempo
+# Utilizando el intervalo de fechas  {date - n , date + n}
+# genera un Mapa Interactivo NDWI (vis = T) o retorna el área del cuerpo de agua en m2 (vis = F):
+# visualiza el Índice enmascarado según la variable umbral
+# (basta con ingresar una fecha)
+NDWI_ULT <- function(date, n = 1, unit = "month", c = 5, reg = roi, umbral = 0.1, vis = F) {
+ 
+  d0 <- ee$Date(date)
+  d1 <- d0$advance(-n, unit)
+  d2 <- d0$advance(n, unit)
+  
+  agg_LS <- LS8_disp$filterDate(d1, d2)$
+    filterBounds(reg)$
+    filterMetadata('CLOUD_COVER','less_than', c)
+  LSC <- ee_get_date_ic(agg_LS) %>%
+    arrange(time_start)
+  LS <- ee$Image(LSC$id[1])
+  
+  NDWI <- LS$normalizedDifference(c("B4", "B5"))$clip(reg)
+  IE_umbral <- NDWI$updateMask(NDWI$gte(umbral))
+  
+  if(vis == TRUE){
+    V_IE <- list(min = 0.2, max = 1, palette = c("#105570","#20FFFF"))
+    V_MAP <- list(min = 0, max = 0.4,  bands = c("B4", "B3", "B2"), gamma = c(1.8, 1.5, 1.4))
+    
+    Map$centerObject(reg, zoom = 12)
+    
+    i_map <- Map$addLayer(LS, V_MAP, 'RGB')+
+      Map$addLayer(IE_umbral, V_IE, 'NDWI')
+    
+    return(i_map)
+    
+  }else{
+    #se multiplica la cantidad de pixeles por el Area por pixel (30m x 30m)
+     IExarea <- IE_umbral$multiply(ee$Image$pixelArea())
+      sum_area <- IExarea$reduceRegion(
+        reducer = ee$Reducer$sum(),
+        maxPixels = 1e13
+        )
+      Area_agu <- sum_area$getInfo()
+      Area_agua <- Area_agu$nd
+
+    return(Area_agua)
+  }
+}
+
+```
+
+
+
+# Mapa Interactivo + NDWI de la región de interés
+(años 2013, 2015, 2017, 2019 y 2021)
+Se busca describir visualmente la evolución bianual de la región de interés
+Se toma como referencia el 01-10 de cada vez, considerando la naturaleza cíclica de las estaciones 
+```{r}
+NDWI_ULT("2013-11-01", vis = T)
+NDWI_ULT("2015-11-01", vis = T)
+NDWI_ULT("2017-11-01", vis = T)
+NDWI_ULT("2019-11-01", vis = T)
+NDWI_ULT("2021-11-01", vis = T)
+```
+
+
+> A lo largo de las cinco imágenes se aprecia de forma clara como el lago ha perdido superficie a través de los últimos años. (Se probaron distintos umbrales para el NDWI y visualmente el umbral = 0.1 parece capturar mejor los cuerpos de agua )
+
+
+
+# Serie anual del 2013 al 2021
+Se busca  obtener la evolución de la superficie del cuerpo de agua y las precipitaciones de los meses previos a cada toma de imagen en la zona. 
+
+* Se extraen las superficies según NDWI en torno a noviembre de cada año
+  Para el caso a estudiar se tomará la primera imagen con "Cloud Cover" > 5, 
+ en el intervalo {noviembre, diciembre}
+* Se extraerán también datos climáticos que se puedan relacionar a la sequía 
+```{r}
+# Secuencia de 01 de noviembre de cada año
+range1 <- c("2013-11-01","2021-12-31")
+dates1 <-seq(as.Date(range1[1]),as.Date(range1[2]),"year") %>% as.character()
+ee_dates1 <- ee$List(dates1)
+
+# Secuencia de 01 de julio de cada año
+range2 <- c("2013-07-01","2021-12-31")
+dates2 <-seq(as.Date(range2[1]),as.Date(range2[2]),"year") %>% as.character()
+ee_dates2 <- ee$List(dates2)
+
+# Se extraen las superficies según NDWI en torno a noviembre de cada año
+# Para el caso a estudiar se tomará la primera imagen con "Cloud Cover" > 5, 
+# en el intervalo {noviembre, diciembre}
+super <- purrr::map(dates1, NDWI_ULT)
+
+# Se extraen los datos de precipitaciones ("pr") en torno a julio de cada año
+# Para el caso de estudio se medirá el intervalo {marzo , octubre}, correspondiente
+# a los 8 meses previos a la superficie captada con el NDWI
+# (Se puede elegir cualquier otra banda de TerraClimate)
+Terra <- purrr::map(dates2, TC_sum)
+TerraCol <- ee$ImageCollection(Terra)
+pr <- ee_extract(TerraCol$select(c("pr")),roi)
+
+# Resultados a dataframe
+s <- as.numeric(matrix(super))
+p <- as.numeric(matrix(pr))
+x <- seq(s)
+
+df <- data.frame (Superficie_m2  = s,
+                  Precipitaciones_mm = p,
+                  Periodos = x)
+df
+
+```
+
+> Considerando que las precipitaciones corresponden a los meses previos a la medición de la superficie, no se observa relación a simple vista
+
+
+ Gráfico con superficie en km2 y precipitación reescalada entre 0 y 1
+```{r}
+
+s <- as.numeric(matrix(super))/1000000
+p <- as.numeric(matrix(pr))/max(pr)
+Periodos <- seq(s)
+
+df <- data.frame (Superficie_kms  = s,
+                  Precipitaciones_mm = p,
+                  Periodos = Periodos)
+
+Area_km2 <- xyplot(s ~ Periodos, df, type = "l" , lwd=2)
+Precipitacion_mm <- xyplot(p ~ Periodos, df, type = "l", lwd=2)
+ 
+doubleYScale(Area_km2, Precipitacion_mm, text = c("Area m2", "Precipitacion_mm") , add.ylab2 = TRUE)
+
+
+```
+
+> En el gráfico solo se observa relación entre los dos periodos mínimos (7 y 8), que coinciden para ambas mediciones
+
+
+# Serie anual del 2013 al 2021
+
+Se busca obtener la evolución de la superficie del cuerpo de agua y las evapotranspiración de los meses previos a cada toma de imagen en la zona. 
+```{r}
+
+# Se extraen las superficies según NDWI en torno a noviembre de cada año
+# Para el caso a estudiar se tomará la primera imagen con "Cloud Cover" > 5, 
+# en el intervalo {noviembre, diciembre}
+super <- purrr::map(dates1, NDWI_ULT)
+
+# Se extraen los datos de Evapotranspiración ("aet") en torno a julio de cada año
+# Para el caso de estudio se medirá el intervalo {marzo , octubre}, correspondiente
+# a los 8 meses previos a la superficie captada con el NDWI
+# (Se puede elegir cualquier otra banda de TerraClimate)
+Terra <- purrr::map(dates2, TC_sum)
+TerraCol <- ee$ImageCollection(Terra)
+aet <- ee_extract(TerraCol$select(c("aet")),roi)
+
+
+
+# Resultados a dataframe
+s <- as.numeric(matrix(super))
+aet <- as.numeric(matrix(aet))/10
+x <- seq(s)
+
+df <- data.frame (Superficie_m2  = s,
+                  Evapotranspiracion_mm = aet,
+                  Periodos = x)
+df
+
+```
+
+> No se observa relación a simple vista
+ 
+
+
+Gráfico con superficie en km2 y evapotranspiración reescalada entre 0 y 1
+```{r}
+s <- as.numeric(matrix(super))/1000000
+aet <- as.numeric(matrix(aet))/max(aet)
+Periodos <- seq(s)
+
+df2 <- data.frame (Superficie_m2  = s,
+                  Evapotranspiracion_mm = aet,
+                  Periodos = Periodos)
+
+Area_km2 <- xyplot(s ~ Periodos, df2, type = "l" , lwd=2)
+Evapotranspiracion_mm <- xyplot(aet ~ Periodos, df2, type = "l", lwd=2)
+ 
+doubleYScale(Area_km2, Evapotranspiracion_mm, text = c("Area m2", "Aet mm") , add.ylab2 = TRUE)
+
+
+```
+
+
+>Se aprecia cierta correlación en los últimos 4 periodos
+
+
+Se definirá una nueva región de interés, bastante más extensa para probar si las funciones siguen corriendo las funciones
+```{r}
+
+roi2 <-
+  c(-70.9342924, -33.8450838) %>%  #  Laguna de Aculeo
+  st_point(dim = "XYZ") %>%
+  st_buffer(dist = .65) %>%
+  sf_as_ee()
+
+## Visualización (OPCIONAL):
+
+Map$centerObject(roi2)
+Map$addLayer(roi2)
+
+
+## Definir una nueva Región de Interés manualmente con mapedit (OPCIONAL):
+
+# roi <- mapedit::editMap()%>%
+# sf_as_ee()
+# Map$centerObject(roi2)
+# Map$addLayer(roi2)
+
+```
+
+# Mapa Interactivo + NDWI de la región de interés
+
+(años 2013, 2017 y 2021)
+Se busca describir visualmente la evolución bianual de la región de interés
+Se toma como referencia el 01-10 de cada vez, considerando la naturaleza cíclica de las estaciones 
+```{r}
+NDWI_ULT("2013-11-01", vis = T, reg = roi2)
+NDWI_ULT("2017-11-01", vis = T, reg = roi2)
+NDWI_ULT("2021-11-01", vis = T, reg = roi2)
+```
+>Se observa un límite en el área que carga el mapa interactivo, sin embargo, llega a cargar bastante más que el tamaño de la Región Metropolitana. A veces algunos de los 3 mapas no cargan el punto central del la región de interés
+
+```{r}
+NDWI_ULT("2013-11-01", vis = F, reg = roi2)
+NDWI_ULT("2017-11-01", vis = F, reg = roi2)
+NDWI_ULT("2021-11-01", vis = F, reg = roi2)
+```
+>Se logra medir a la superficie de los cuerpos de agua, pero no correctamente por el tamaño de la región de interés. Hace falta una tomar regiones más pequeñas para evitar que partes de la región de interés queden fuera de la imagen cargada por Earth Engine.
+
+
+# 3. Análisis descriptivo de resultados y Conclusiones: 
+
+El cálculo de las superficies de cuerpos de agua fue correcto y fácil de modificar para probar otros lugares o fechas. Tanto el Lago Peñuelas como la Laguna de Aculeo evidencian, a partir de los datos obtenidos, la sequía de la Zona Central de Chile, sobre todo durante los últimos tres años. 
+
+Las mediciones de otros datos como precipitaciones o evapotranspiración, no se aprecia una relación clara en el intervalo de datos del Landsat 8 (2013-2021), salvo por la relación de la sequía y las bajas precipitaciones de los años 2019 y 2021.
+
+Respecto a la dimensión de las regiones de interés, hay un punto en el que el tamaño afecta el desempeño de las funciones implementadas en este trabajo. Ese tamaño parece estar cercano a la circunferencia generada por un buffer de = 0.4. Por lo que, sería necesario otro tipo de implementación para cubrir áreas más extensas. Por otro lado, esta implementación es aplicable en cualquier parte del mapa terrestre y se podría modificar rápidamente para usar cualquier índice espectral. De forma similar, podría adaptar fácilmente para el uso de cualquier dataset de Earth Engine.
+
+En general, me dejó bastante sorprendido todo lo que se podría hacer con usando Earth Engine, es una herramienta muy valiosa y versátil para la ciencia de datos. 
+
+
+
+
